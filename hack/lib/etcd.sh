@@ -76,6 +76,12 @@ kube::etcd::start() {
   kube::etcd::validate
 
   # Start etcd
+  if [[ -z ${KUBE_DATA_DIR} ]]; then
+    ETCD_DIR=${ETCD_DIR:-$(mktemp -d 2>/dev/null || mktemp -d -t test-etcd.XXXXXX)}
+  else
+    ETCD_DIR=${KUBE_DATA_DIR}/etcd
+    mkdir -p "${ETCD_DIR}"
+  fi
   ETCD_DIR=${ETCD_DIR:-$(mktemp -d 2>/dev/null || mktemp -d -t test-etcd.XXXXXX)}
   if [[ -d "${ARTIFACTS:-}" ]]; then
     ETCD_LOGFILE="${ARTIFACTS}/etcd.$(uname -n).$(id -un).log.DEBUG.$(date +%Y%m%d-%H%M%S).$$"
@@ -83,8 +89,32 @@ kube::etcd::start() {
     ETCD_LOGFILE=${ETCD_LOGFILE:-"/dev/null"}
   fi
   kube::log::info "etcd --advertise-client-urls ${KUBE_INTEGRATION_ETCD_URL} --data-dir ${ETCD_DIR} --listen-client-urls http://${ETCD_HOST}:${ETCD_PORT} --log-level=debug > \"${ETCD_LOGFILE}\" 2>/dev/null"
-  etcd --advertise-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --data-dir "${ETCD_DIR}" --listen-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --log-level=debug 2> "${ETCD_LOGFILE}" >/dev/null &
+  if [[ "${ENABLE_SYSTEMD_MODE}" = true ]]; then
+    cat <<EOF >/etc/systemd/system/etcd.service
+[Unit]
+Description=Etcd
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Restart=no
+ExecStart=/root/guodong/kubernetes/third_party/etcd/etcd \\
+    --advertise-client-urls "${KUBE_INTEGRATION_ETCD_URL}" \\
+    --data-dir "${ETCD_DIR}" \\
+    --listen-client-urls "${KUBE_INTEGRATION_ETCD_URL}" \\
+    --log-level=debug
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload
+        systemctl enable etcd.service
+        systemctl restart etcd.service
+  else
+    etcd --advertise-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --data-dir "${ETCD_DIR}" --listen-client-urls "${KUBE_INTEGRATION_ETCD_URL}" --log-level=debug 2> "${ETCD_LOGFILE}" >/dev/null &
   ETCD_PID=$!
+  fi
 
   echo "Waiting for etcd to come up."
   kube::util::wait_for_url "${KUBE_INTEGRATION_ETCD_URL}/health" "etcd: " 0.25 80

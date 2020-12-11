@@ -21,6 +21,22 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
 # CA in /var/run/kubernetes.
 # Usage: `hack/local-up-cluster.sh`.
 
+systemctl stop kube-proxy
+systemctl stop kubelet
+systemctl stop kube-scheduler
+systemctl stop kube-controller-manager
+systemctl stop kube-apiserver
+systemctl stop etcd
+
+KUBE_CONF_DIR="/etc/kubernetes"
+KUBE_DATA_DIR="/var/lib/kubernetes"
+
+rm -rf ${KUBE_CONF_DIR}
+mkdir ${KUBE_CONF_DIR}
+
+rm -rf ${KUBE_DATA_DIR}
+mkdir ${KUBE_DATA_DIR}
+
 DOCKER_OPTS=${DOCKER_OPTS:-""}
 export DOCKER=(docker "${DOCKER_OPTS[@]}")
 DOCKER_ROOT=${DOCKER_ROOT:-""}
@@ -86,6 +102,9 @@ STORAGE_BACKEND=${STORAGE_BACKEND:-"etcd3"}
 STORAGE_MEDIA_TYPE=${STORAGE_MEDIA_TYPE:-"application/vnd.kubernetes.protobuf"}
 # preserve etcd data. you also need to set ETCD_DIR.
 PRESERVE_ETCD="${PRESERVE_ETCD:-false}"
+
+# enable systemd mode
+ENABLE_SYSTEMD_MODE=${ENABLE_SYSTEMD_MODE:-true}
 
 # enable kubernetes dashboard
 ENABLE_CLUSTER_DASHBOARD=${KUBE_ENABLE_CLUSTER_DASHBOARD:-false}
@@ -222,8 +241,6 @@ KUBELET_HOST=${KUBELET_HOST:-"127.0.0.1"}
 # By default only allow CORS for requests on localhost
 API_CORS_ALLOWED_ORIGINS=${API_CORS_ALLOWED_ORIGINS:-/127.0.0.1(:[0-9]+)?$,/localhost(:[0-9]+)?$}
 KUBELET_PORT=${KUBELET_PORT:-10250}
-# By default we use 0(close it) for it's insecure
-KUBELET_READ_ONLY_PORT=${KUBELET_READ_ONLY_PORT:-0}
 LOG_LEVEL=${LOG_LEVEL:-3}
 # Use to increase verbosity on particular files, e.g. LOG_SPEC=token_controller*=5,other_controller*=4
 LOG_SPEC=${LOG_SPEC:-""}
@@ -553,46 +570,108 @@ EOF
 
     APISERVER_LOG=${LOG_DIR}/kube-apiserver.log
     # shellcheck disable=SC2086
-    ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-apiserver" "${authorizer_arg}" "${priv_arg}" ${runtime_config} \
-      ${cloud_config_arg} \
-      "${advertise_address}" \
-      "${node_port_range}" \
-      --v="${LOG_LEVEL}" \
-      --vmodule="${LOG_SPEC}" \
-      --audit-policy-file="${AUDIT_POLICY_FILE}" \
-      --audit-log-path="${LOG_DIR}/kube-apiserver-audit.log" \
-      --authorization-webhook-config-file="${AUTHORIZATION_WEBHOOK_CONFIG_FILE}" \
-      --authentication-token-webhook-config-file="${AUTHENTICATION_WEBHOOK_CONFIG_FILE}" \
-      --cert-dir="${CERT_DIR}" \
-      --client-ca-file="${CERT_DIR}/client-ca.crt" \
-      --kubelet-client-certificate="${CERT_DIR}/client-kube-apiserver.crt" \
-      --kubelet-client-key="${CERT_DIR}/client-kube-apiserver.key" \
-      --service-account-key-file="${SERVICE_ACCOUNT_KEY}" \
-      --service-account-lookup="${SERVICE_ACCOUNT_LOOKUP}" \
-      --service-account-issuer="https://kubernetes.default.svc" \
-      --service-account-signing-key-file="${SERVICE_ACCOUNT_KEY}" \
-      --enable-admission-plugins="${ENABLE_ADMISSION_PLUGINS}" \
-      --disable-admission-plugins="${DISABLE_ADMISSION_PLUGINS}" \
-      --admission-control-config-file="${ADMISSION_CONTROL_CONFIG_FILE}" \
-      --bind-address="${API_BIND_ADDR}" \
-      --secure-port="${API_SECURE_PORT}" \
-      --tls-cert-file="${CERT_DIR}/serving-kube-apiserver.crt" \
-      --tls-private-key-file="${CERT_DIR}/serving-kube-apiserver.key" \
-      --storage-backend="${STORAGE_BACKEND}" \
-      --storage-media-type="${STORAGE_MEDIA_TYPE}" \
-      --etcd-servers="http://${ETCD_HOST}:${ETCD_PORT}" \
-      --service-cluster-ip-range="${SERVICE_CLUSTER_IP_RANGE}" \
-      --feature-gates="${FEATURE_GATES}" \
-      --external-hostname="${EXTERNAL_HOSTNAME}" \
-      --requestheader-username-headers=X-Remote-User \
-      --requestheader-group-headers=X-Remote-Group \
-      --requestheader-extra-headers-prefix=X-Remote-Extra- \
-      --requestheader-client-ca-file="${CERT_DIR}/request-header-ca.crt" \
-      --requestheader-allowed-names=system:auth-proxy \
-      --proxy-client-cert-file="${CERT_DIR}/client-auth-proxy.crt" \
-      --proxy-client-key-file="${CERT_DIR}/client-auth-proxy.key" \
-      --cors-allowed-origins="${API_CORS_ALLOWED_ORIGINS}" >"${APISERVER_LOG}" 2>&1 &
-    APISERVER_PID=$!
+
+    if [[ "${ENABLE_SYSTEMD_MODE}" = true ]]; then
+        cat <<EOF >/etc/systemd/system/kube-apiserver.service
+[Unit]
+Description=Kubernetes kube-apiserver
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Restart=no
+ExecStart="${GO_OUT}/kube-apiserver" \\
+                ${authorizer_arg} \\
+                ${priv_arg} \\
+                ${runtime_config} \\
+                ${cloud_config_arg} \\
+                ${advertise_address} \\
+                ${node_port_range} \\
+                --v=${LOG_LEVEL} \\
+                --vmodule=${LOG_SPEC} \\
+                --audit-policy-file=${AUDIT_POLICY_FILE} \\
+                --audit-log-path=${LOG_DIR}/kube-apiserver-audit.log \\
+                --authorization-webhook-config-file=${AUTHORIZATION_WEBHOOK_CONFIG_FILE} \\
+                --authentication-token-webhook-config-file=${AUTHENTICATION_WEBHOOK_CONFIG_FILE} \\
+                --cert-dir=${CERT_DIR} \\
+                --client-ca-file=${CERT_DIR}/client-ca.crt \\
+                --kubelet-client-certificate=${CERT_DIR}/client-kube-apiserver.crt \\
+                --kubelet-client-key=${CERT_DIR}/client-kube-apiserver.key \\
+                --service-account-key-file=${SERVICE_ACCOUNT_KEY} \\
+                --service-account-lookup=${SERVICE_ACCOUNT_LOOKUP} \\
+                --service-account-issuer=https://kubernetes.default.svc \\
+                --service-account-signing-key-file=${SERVICE_ACCOUNT_KEY} \\
+                --enable-admission-plugins=${ENABLE_ADMISSION_PLUGINS} \\
+                --disable-admission-plugins=${DISABLE_ADMISSION_PLUGINS} \\
+                --admission-control-config-file=${ADMISSION_CONTROL_CONFIG_FILE} \\
+                --bind-address=${API_BIND_ADDR} \\
+                --secure-port=${API_SECURE_PORT} \\
+                --tls-cert-file=${CERT_DIR}/serving-kube-apiserver.crt \\
+                --tls-private-key-file=${CERT_DIR}/serving-kube-apiserver.key \\
+                --storage-backend=${STORAGE_BACKEND} \\
+                --storage-media-type=${STORAGE_MEDIA_TYPE} \\
+                --etcd-servers=http://${ETCD_HOST}:${ETCD_PORT} \\
+                --service-cluster-ip-range=${SERVICE_CLUSTER_IP_RANGE} \\
+                --feature-gates=${FEATURE_GATES} \\
+                --external-hostname=${EXTERNAL_HOSTNAME} \\
+                --requestheader-username-headers=X-Remote-User \\
+                --requestheader-group-headers=X-Remote-Group \\
+                --requestheader-extra-headers-prefix=X-Remote-Extra- \\
+                --requestheader-client-ca-file=${CERT_DIR}/request-header-ca.crt \\
+                --requestheader-allowed-names=system:auth-proxy \\
+                --proxy-client-cert-file=${CERT_DIR}/client-auth-proxy.crt \\
+                --proxy-client-key-file=${CERT_DIR}/client-auth-proxy.key \\
+                --cors-allowed-origins="${API_CORS_ALLOWED_ORIGINS}"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload
+        systemctl enable kube-apiserver.service
+        systemctl restart kube-apiserver.service
+    else
+        ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-apiserver" "${authorizer_arg}" "${priv_arg}" ${runtime_config} \
+          ${cloud_config_arg} \
+          "${advertise_address}" \
+          "${node_port_range}" \
+          --v="${LOG_LEVEL}" \
+          --vmodule="${LOG_SPEC}" \
+          --audit-policy-file="${AUDIT_POLICY_FILE}" \
+          --audit-log-path="${LOG_DIR}/kube-apiserver-audit.log" \
+          --authorization-webhook-config-file="${AUTHORIZATION_WEBHOOK_CONFIG_FILE}" \
+          --authentication-token-webhook-config-file="${AUTHENTICATION_WEBHOOK_CONFIG_FILE}" \
+          --cert-dir="${CERT_DIR}" \
+          --client-ca-file="${CERT_DIR}/client-ca.crt" \
+          --kubelet-client-certificate="${CERT_DIR}/client-kube-apiserver.crt" \
+          --kubelet-client-key="${CERT_DIR}/client-kube-apiserver.key" \
+          --service-account-key-file="${SERVICE_ACCOUNT_KEY}" \
+          --service-account-lookup="${SERVICE_ACCOUNT_LOOKUP}" \
+          --service-account-issuer="https://kubernetes.default.svc" \
+          --service-account-signing-key-file="${SERVICE_ACCOUNT_KEY}" \
+          --enable-admission-plugins="${ENABLE_ADMISSION_PLUGINS}" \
+          --disable-admission-plugins="${DISABLE_ADMISSION_PLUGINS}" \
+          --admission-control-config-file="${ADMISSION_CONTROL_CONFIG_FILE}" \
+          --bind-address="${API_BIND_ADDR}" \
+          --secure-port="${API_SECURE_PORT}" \
+          --tls-cert-file="${CERT_DIR}/serving-kube-apiserver.crt" \
+          --tls-private-key-file="${CERT_DIR}/serving-kube-apiserver.key" \
+          --storage-backend="${STORAGE_BACKEND}" \
+          --storage-media-type="${STORAGE_MEDIA_TYPE}" \
+          --etcd-servers="http://${ETCD_HOST}:${ETCD_PORT}" \
+          --service-cluster-ip-range="${SERVICE_CLUSTER_IP_RANGE}" \
+          --feature-gates="${FEATURE_GATES}" \
+          --external-hostname="${EXTERNAL_HOSTNAME}" \
+          --requestheader-username-headers=X-Remote-User \
+          --requestheader-group-headers=X-Remote-Group \
+          --requestheader-extra-headers-prefix=X-Remote-Extra- \
+          --requestheader-client-ca-file="${CERT_DIR}/request-header-ca.crt" \
+          --requestheader-allowed-names=system:auth-proxy \
+          --proxy-client-cert-file="${CERT_DIR}/client-auth-proxy.crt" \
+          --proxy-client-key-file="${CERT_DIR}/client-auth-proxy.key" \
+          --cors-allowed-origins="${API_CORS_ALLOWED_ORIGINS}" >"${APISERVER_LOG}" 2>&1 &
+        APISERVER_PID=$!
+    fi
 
     # Wait for kube-apiserver to come up before launching the rest of the components.
     echo "Waiting for apiserver to come up"
@@ -636,26 +715,64 @@ function start_controller_manager {
     fi
 
     CTLRMGR_LOG=${LOG_DIR}/kube-controller-manager.log
-    ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-controller-manager" \
-      --v="${LOG_LEVEL}" \
-      --vmodule="${LOG_SPEC}" \
-      --service-account-private-key-file="${SERVICE_ACCOUNT_KEY}" \
-      --service-cluster-ip-range="${SERVICE_CLUSTER_IP_RANGE}" \
-      --root-ca-file="${ROOT_CA_FILE}" \
-      --cluster-signing-cert-file="${CLUSTER_SIGNING_CERT_FILE}" \
-      --cluster-signing-key-file="${CLUSTER_SIGNING_KEY_FILE}" \
-      --enable-hostpath-provisioner="${ENABLE_HOSTPATH_PROVISIONER}" \
-      ${node_cidr_args[@]+"${node_cidr_args[@]}"} \
-      --pvclaimbinder-sync-period="${CLAIM_BINDER_SYNC_PERIOD}" \
-      --feature-gates="${FEATURE_GATES}" \
-      "${cloud_config_arg[@]}" \
-      --kubeconfig "${CERT_DIR}"/controller.kubeconfig \
-      --use-service-account-credentials \
-      --controllers="${KUBE_CONTROLLERS}" \
-      --leader-elect=false \
-      --cert-dir="${CERT_DIR}" \
-      --master="https://${API_HOST}:${API_SECURE_PORT}" >"${CTLRMGR_LOG}" 2>&1 &
-    CTLRMGR_PID=$!
+    if [[ "${ENABLE_SYSTEMD_MODE}" = true ]]; then
+        cat <<EOF >/etc/systemd/system/kube-controller-manager.service
+[Unit]
+Description=Kubernetes kube-controller-manager
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Restart=no
+ExecStart="${GO_OUT}/kube-controller-manager" \\
+                    --v=${LOG_LEVEL} \\
+                    --vmodule=${LOG_SPEC} \\
+                    --service-account-private-key-file=${SERVICE_ACCOUNT_KEY} \\
+                    --service-cluster-ip-range=${SERVICE_CLUSTER_IP_RANGE} \\
+                    --root-ca-file=${ROOT_CA_FILE} \\
+                    --cluster-signing-cert-file=${CLUSTER_SIGNING_CERT_FILE} \\
+                    --cluster-signing-key-file=${CLUSTER_SIGNING_KEY_FILE} \\
+                    --enable-hostpath-provisioner=${ENABLE_HOSTPATH_PROVISIONER} \\
+                    ${node_cidr_args[@]+${node_cidr_args[@]}} \\
+                    --pvclaimbinder-sync-period=${CLAIM_BINDER_SYNC_PERIOD} \\
+                    --feature-gates=${FEATURE_GATES} \\
+                    ${cloud_config_arg[@]} \\
+                    --kubeconfig ${CERT_DIR}/controller.kubeconfig \\
+                    --use-service-account-credentials \\
+                    --controllers=${KUBE_CONTROLLERS} \\
+                    --leader-elect=false \\
+                    --cert-dir=${CERT_DIR} \\
+                    --master=https://${API_HOST}:${API_SECURE_PORT}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload
+        systemctl enable kube-controller-manager.service
+        systemctl start kube-controller-manager.service
+    else
+        ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-controller-manager" \
+          --v="${LOG_LEVEL}" \
+          --vmodule="${LOG_SPEC}" \
+          --service-account-private-key-file="${SERVICE_ACCOUNT_KEY}" \
+          --service-cluster-ip-range="${SERVICE_CLUSTER_IP_RANGE}" \
+          --root-ca-file="${ROOT_CA_FILE}" \
+          --cluster-signing-cert-file="${CLUSTER_SIGNING_CERT_FILE}" \
+          --cluster-signing-key-file="${CLUSTER_SIGNING_KEY_FILE}" \
+          --enable-hostpath-provisioner="${ENABLE_HOSTPATH_PROVISIONER}" \
+          ${node_cidr_args[@]+"${node_cidr_args[@]}"} \
+          --pvclaimbinder-sync-period="${CLAIM_BINDER_SYNC_PERIOD}" \
+          --feature-gates="${FEATURE_GATES}" \
+          "${cloud_config_arg[@]}" \
+          --kubeconfig "${CERT_DIR}"/controller.kubeconfig \
+          --use-service-account-credentials \
+          --controllers="${KUBE_CONTROLLERS}" \
+          --leader-elect=false \
+          --cert-dir="${CERT_DIR}" \
+          --master="https://${API_HOST}:${API_SECURE_PORT}" >"${CTLRMGR_LOG}" 2>&1 &
+        CTLRMGR_PID=$!
+    fi
 }
 
 function start_cloud_controller_manager {
@@ -783,7 +900,6 @@ enableControllerAttachDetach: ${ENABLE_CONTROLLER_ATTACH_DETACH}
 evictionPressureTransitionPeriod: "${EVICTION_PRESSURE_TRANSITION_PERIOD}"
 failSwapOn: ${FAIL_SWAP_ON}
 port: ${KUBELET_PORT}
-readOnlyPort: ${KUBELET_READ_ONLY_PORT}
 rotateCertificates: true
 runtimeRequestTimeout: "${RUNTIME_REQUEST_TIMEOUT}"
 staticPodPath: "${POD_MANIFEST_PATH}"
@@ -841,16 +957,38 @@ EOF
       fi
     } >>/tmp/kubelet.yaml
 
-    # shellcheck disable=SC2024
-    sudo -E "${GO_OUT}/kubelet" "${all_kubelet_flags[@]}" \
-      --config=/tmp/kubelet.yaml >"${KUBELET_LOG}" 2>&1 &
-    KUBELET_PID=$!
+    if [[ "${ENABLE_SYSTEMD_MODE}" = true ]]; then
+        cp /tmp/kubelet.yaml ${KUBE_CONF_DIR}/kubelet.yaml
+        cat <<EOF >/etc/systemd/system/kubelet.service
+[Unit]
+Description=Kubernetes kubelet
+Requires=network-online.target
+After=network-online.target
 
-    # Quick check that kubelet is running.
-    if [ -n "${KUBELET_PID}" ] && ps -p ${KUBELET_PID} > /dev/null; then
-      echo "kubelet ( ${KUBELET_PID} ) is running."
+[Service]
+Restart=no
+ExecStart=${GO_OUT}/kubelet \\
+    --config=${KUBE_CONF_DIR}/kubelet.yaml \\
+    ${all_kubelet_flags[@]}
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload
+        systemctl enable kubelet.service
+        systemctl start kubelet.service
     else
-      cat "${KUBELET_LOG}" ; exit 1
+        # shellcheck disable=SC2024
+        sudo -E "${GO_OUT}/kubelet" "${all_kubelet_flags[@]}" \
+          --config=/tmp/kubelet.yaml >"${KUBELET_LOG}" 2>&1 &
+        KUBELET_PID=$!
+
+        # Quick check that kubelet is running.
+        if [ -n "${KUBELET_PID}" ] && ps -p ${KUBELET_PID} > /dev/null; then
+          echo "kubelet ( ${KUBELET_PID} ) is running."
+        else
+          cat "${KUBELET_LOG}" ; exit 1
+        fi
     fi
 }
 
@@ -883,18 +1021,45 @@ EOF
         generate_kubeproxy_certs
     fi
 
-    # shellcheck disable=SC2024
-    sudo "${GO_OUT}/kube-proxy" \
-      --v="${LOG_LEVEL}" \
-      --config=/tmp/kube-proxy.yaml \
-      --master="https://${API_HOST}:${API_SECURE_PORT}" >"${PROXY_LOG}" 2>&1 &
-    PROXY_PID=$!
+
+    if [[ "${ENABLE_SYSTEMD_MODE}" = true ]]; then
+
+        cp /tmp/kube-proxy.yaml ${KUBE_CONF_DIR}/kube-proxy.yaml
+
+        cat <<EOF >/etc/systemd/system/kube-proxy.service
+[Unit]
+Description=Kubernetes kube-proxy
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Restart=no
+ExecStart="${GO_OUT}/kube-proxy" \\
+                    --v=${LOG_LEVEL} \\
+                    --config=${KUBE_CONF_DIR}/kube-proxy.yaml \\
+                    --master=https://${API_HOST}:${API_SECURE_PORT}
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload
+        systemctl enable kube-proxy.service
+        systemctl start kube-proxy.service
+    else
+        # shellcheck disable=SC2024
+        sudo "${GO_OUT}/kube-proxy" \
+          --v="${LOG_LEVEL}" \
+          --config=/tmp/kube-proxy.yaml \
+          --master="https://${API_HOST}:${API_SECURE_PORT}" >"${PROXY_LOG}" 2>&1 &
+        PROXY_PID=$!
+    fi
 }
 
 function start_kubescheduler {
     SCHEDULER_LOG=${LOG_DIR}/kube-scheduler.log
 
-    cat <<EOF > /tmp/kube-scheduler.yaml
+    if [[ "${ENABLE_SYSTEMD_MODE}" = true ]]; then
+            cat <<EOF > ${KUBE_CONF_DIR}/kube-scheduler.yaml
 apiVersion: kubescheduler.config.k8s.io/v1beta1
 kind: KubeSchedulerConfiguration
 clientConnection:
@@ -902,12 +1067,43 @@ clientConnection:
 leaderElection:
   leaderElect: false
 EOF
-    ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-scheduler" \
-      --v="${LOG_LEVEL}" \
-      --config=/tmp/kube-scheduler.yaml \
-      --feature-gates="${FEATURE_GATES}" \
-      --master="https://${API_HOST}:${API_SECURE_PORT}" >"${SCHEDULER_LOG}" 2>&1 &
-    SCHEDULER_PID=$!
+        cat <<EOF >/etc/systemd/system/kube-scheduler.service
+[Unit]
+Description=Kubernetes kube-scheduler
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Restart=no
+ExecStart="${GO_OUT}/kube-scheduler" \\
+                    --v=${LOG_LEVEL} \\
+                    --config=${KUBE_CONF_DIR}/kube-scheduler.yaml \\
+                    --feature-gates=${FEATURE_GATES} \\
+                    --master=https://${API_HOST}:${API_SECURE_PORT}
+[Install]
+WantedBy=multi-user.target
+EOF
+
+        systemctl daemon-reload
+        systemctl enable kube-scheduler.service
+        systemctl start kube-scheduler.service
+    else
+        cat <<EOF > /tmp/kube-scheduler.yaml
+apiVersion: kubescheduler.config.k8s.io/v1beta1
+kind: KubeSchedulerConfiguration
+clientConnection:
+  kubeconfig: ${CERT_DIR}/scheduler.kubeconfig
+leaderElection:
+  leaderElect: false
+EOF
+
+        ${CONTROLPLANE_SUDO} "${GO_OUT}/kube-scheduler" \
+          --v="${LOG_LEVEL}" \
+          --config=/tmp/kube-scheduler.yaml \
+          --feature-gates="${FEATURE_GATES}" \
+          --master="https://${API_HOST}:${API_SECURE_PORT}" >"${SCHEDULER_LOG}" 2>&1 &
+        SCHEDULER_PID=$!
+    fi
 }
 
 function start_kubedns {
@@ -1095,7 +1291,7 @@ if [[ "${START_MODE}" != "kubeletonly" ]]; then
 fi
 
 kube::util::test_openssl_installed
-kube::util::ensure-cfssl
+kube::util::ensure-cfssl /usr/local/bin
 
 ### IF the user didn't supply an output/ for the build... Then we detect.
 if [ "${GO_OUT}" == "" ]; then
@@ -1104,9 +1300,9 @@ fi
 echo "Detected host and ready to start services.  Doing some housekeeping first..."
 echo "Using GO_OUT ${GO_OUT}"
 export KUBELET_CIDFILE=/tmp/kubelet.cid
-if [[ "${ENABLE_DAEMON}" = false ]]; then
-  trap cleanup EXIT
-fi
+# if [[ "${ENABLE_DAEMON}" = false ]]; then
+#   trap cleanup EXIT
+# fi
 
 echo "Starting services now!"
 if [[ "${START_MODE}" != "kubeletonly" ]]; then
@@ -1148,23 +1344,23 @@ if [[ "${START_MODE}" != "kubeletonly" ]]; then
     start_kubeproxy
   fi
 fi
-if [[ -n "${PSP_ADMISSION}" && "${AUTHORIZATION_MODE}" = *RBAC* ]]; then
-  create_psp_policy
-fi
-
-if [[ "${DEFAULT_STORAGE_CLASS}" = "true" ]]; then
-  create_storage_class
-fi
-
+# if [[ -n "${PSP_ADMISSION}" && "${AUTHORIZATION_MODE}" = *RBAC* ]]; then
+#   create_psp_policy
+# fi
+#
+# if [[ "${DEFAULT_STORAGE_CLASS}" = "true" ]]; then
+#   create_storage_class
+# fi
+#
 print_success
 
-if [[ "${ENABLE_DAEMON}" = false ]]; then
-  while true; do sleep 1; healthcheck; done
-fi
-
-if [[ "${KUBETEST_IN_DOCKER:-}" == "true" ]]; then
-  cluster/kubectl.sh config set-cluster local --server=https://localhost:6443 --certificate-authority=/var/run/kubernetes/server-ca.crt
-  cluster/kubectl.sh config set-credentials myself --client-key=/var/run/kubernetes/client-admin.key --client-certificate=/var/run/kubernetes/client-admin.crt
-  cluster/kubectl.sh config set-context local --cluster=local --user=myself
-  cluster/kubectl.sh config use-context local
-fi
+# if [[ "${ENABLE_DAEMON}" = false ]]; then
+#   while true; do sleep 1; healthcheck; done
+# fi
+#
+# if [[ "${KUBETEST_IN_DOCKER:-}" == "true" ]]; then
+#   cluster/kubectl.sh config set-cluster local --server=https://localhost:6443 --certificate-authority=/var/run/kubernetes/server-ca.crt
+#   cluster/kubectl.sh config set-credentials myself --client-key=/var/run/kubernetes/client-admin.key --client-certificate=/var/run/kubernetes/client-admin.crt
+#   cluster/kubectl.sh config set-context local --cluster=local --user=myself
+#   cluster/kubectl.sh config use-context local
+# fi
